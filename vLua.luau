@@ -1,7 +1,9 @@
 local vLua = {}
 
--- Interpreter                                       local function interpret(ast, env)
-        env = env or getfenv(0)                      
+-- Interpreter
+local function interpret(ast, env)
+        env = env or getfenv(0)
+
         local function eval(node, scope)
                 if node.type == "Lit" then return node.val
                 elseif node.type == "Id" then return scope[node.name]
@@ -180,6 +182,171 @@ LocalScript"}
                         interpret(ast, localEnv)
                 else
                         interpret(ast, env)
+                end
+        end)
+
+        task.synchronize()
+
+        if not success then
+                error("vLua execution error: " .. tostring(result))
+        end
+
+        return result
+end
+
+return vLua
+, b = instr[2], instr[3]
+                        self.stack[frame.base + a] = not self.stack[frame.base + b]
+                elseif op == OP.LEN then
+                        local a, b = instr[2], instr[3]
+                        self.stack[frame.base + a] = #self.stack[frame.base + b]
+                elseif op == OP.CONCAT then
+                        local a, b, c = instr[2], instr[3], instr[4]
+                        self.stack[frame.base + a] = tostring(self.stack[frame.base + b]) .. tostring(self.stack[frame.base + c])
+                elseif op == OP.JMP then
+                        local sbx = instr[2]
+                        frame.pc = frame.pc + sbx
+                elseif op == OP.EQ then
+                        local a, b, c = instr[2], instr[3], instr[4]
+                        if (self.stack[frame.base + b] == self.stack[frame.base + c]) ~= (a == 1) then
+                                frame.pc = frame.pc + 1
+                        end
+                elseif op == OP.LT then
+                        local a, b, c = instr[2], instr[3], instr[4]
+                        if (self.stack[frame.base + b] < self.stack[frame.base + c]) ~= (a == 1) then
+                                frame.pc = frame.pc + 1
+                        end
+                elseif op == OP.LE then
+                        local a, b, c = instr[2], instr[3], instr[4]
+                        if (self.stack[frame.base + b] <= self.stack[frame.base + c]) ~= (a == 1) then
+                                frame.pc = frame.pc + 1
+                        end
+                elseif op == OP.TEST then
+                        local a, c = instr[2], instr[3]
+                        if not self.stack[frame.base + a] == (c == 1) then
+                                frame.pc = frame.pc + 1
+                        end
+                elseif op == OP.CALL then
+                        local a, b, c = instr[2], instr[3], instr[4]
+                        local func = self.stack[frame.base + a]
+                        local args = {}
+                        for i = 1, b - 1 do
+                                table.insert(args, self.stack[frame.base + a + i])
+                        end
+
+                        if type(func) == "table" and func.proto then
+                                local results = {self:execute(func, args)}
+                                for i = 1, c - 1 do
+                                        self.stack[frame.base + a + i - 1] = results[i]
+                                end
+                        else
+                                local results = {func(unpack(args))}
+                                for i = 1, c - 1 do
+                                        self.stack[frame.base + a + i - 1] = results[i]
+                                end
+                        end
+                elseif op == OP.RETURN then
+                        local a, b = instr[2], instr[3]
+                        local results = {}
+                        if b == 0 then
+                                for i = a, frame.top - frame.base do
+                                        table.insert(results, self.stack[frame.base + i])
+                                end
+                        else
+                                for i = 0, b - 2 do
+                                        table.insert(results, self.stack[frame.base + a + i])
+                                end
+                        end
+
+                        self:closeUpvalues(frame.base)
+
+                        for i = 1, closure.proto.maxStack do
+                                table.remove(self.stack)
+                        end
+                        table.remove(self.frames)
+
+                        return unpack(results)
+                elseif op == OP.CLOSURE then
+                        local a, bx = instr[2], instr[3]
+                        local proto = closure.proto.protos[bx + 1]
+                        local newClosure = {
+                                proto = proto,
+                                upvals = {},
+                                env = self.env
+                        }
+
+                        for i, uvDesc in ipairs(proto.upvalues) do
+                                if uvDesc.instack then
+                                        table.insert(newClosure.upvals, self:createUpvalue(frame.base + uvDesc.idx))
+                                else
+                                        table.insert(newClosure.upvals, closure.upvals[uvDesc.idx + 1])
+                                end
+                        end
+
+                        self.stack[frame.base + a] = newClosure
+                elseif op == OP.CLOSE then
+                        local a = instr[2]
+                        self:closeUpvalues(frame.base + a)
+                end
+        end
+
+        return nil
+end
+
+-- Main Execute Function
+function vLua.Execute(source: string, scriptType: string?)
+        task.desynchronize()
+
+        local success, result = pcall(function()
+                -- Tokenize
+                local tokens = tokenize(source)
+
+                -- Parse
+                local parser = Parser.new(tokens)
+                local ast = parser:parseBlock()
+
+                -- Compile
+                local compiler = Compiler.new()
+                compiler:compileBlock(ast)
+                compiler:emit(OP.RETURN, 0, 0)
+
+                -- Create closure
+                local env = getfenv(2)
+
+                if scriptType == "ModuleScript" then
+                        env = setmetatable({}, {
+                                __index = function(_, key)
+                                        if key == "script" then
+                                                return {ClassName = "ModuleScript"}
+                                        end
+                                        return getfenv(2)[key]
+                                end
+                        })
+                elseif scriptType == "LocalScript" then
+                        env = setmetatable({}, {
+                                __index = function(_, key)
+                                        if key == "script" then
+                                                return {ClassName = "LocalScript"}
+                                        end
+                                        return getfenv(2)[key]
+                                end
+                        })
+                end
+
+                local mainClosure = {
+                        proto = compiler.proto,
+                        upvals = {},
+                        env = env
+                }
+
+                -- Execute
+                local vm = VM.new(mainClosure, env)
+                local results = {vm:execute(mainClosure, {})}
+
+                if scriptType == "ModuleScript" then
+                        return env.module or results[1] or {}
+                else
+                        return unpack(results)
                 end
         end)
 
